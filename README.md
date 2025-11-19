@@ -18,5 +18,9 @@ $ make
 ## Running
 
 ```
-$ qemu-system-x86_64 -nodefaults -nographic -kernel dist/hello.qemu -machine virt -serial stdio -cpu cortex-a53
+$ qemu-system-x86_64 \
+  -kernel dist/hello.qemu \
+  -nodefaults -nographic \
+  -serial stdio \
+  -machine virt
 ```
