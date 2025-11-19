@@ -1,15 +1,16 @@
-open Lwt.Infix
-
 module Mem = Irmin_mem.KV.Make(Irmin.Contents.String)
 
-let now env = Eio.Time.now env#clock |> Int64.of_float
+let now clock = Eio.Time.now clock |> Int64.of_float
+
+let (let@) = (@@)
 
 let start () =
-  Eio_unikraft.run @@ fun env ->
+  let@ env = Eio_unikraft.run in
+  Eio.traceln "Started!!!";
   let repo = Mem.Repo.v (Irmin_mem.config ()) in
   let main = Mem.main repo in
   let info () =
-    Irmin.Info.Default.v ~author:"test" ~message:"test" (now env)
+    Irmin.Info.Default.v ~author:"test" ~message:"test" (now env#clock)
   in
   let () = Mem.set_exn main ~info ["greeting"] "Hello from Irmin!" in
   let rec loop = function
