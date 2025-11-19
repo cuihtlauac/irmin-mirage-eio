@@ -7,3 +7,4 @@ dune-project
 dune.build
 dune.config
 duniverse
+Makefile
