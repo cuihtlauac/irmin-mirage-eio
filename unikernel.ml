@@ -7,20 +7,19 @@ let (let@) = (@@)
 open Lwt.Infix
 
 module Make(Tcp : Tcpip.Tcp.S with type ipaddr = Ipaddr.t) = struct
-
   let start tcp =
+    Eio_unikraft.run @@ fun env ->
+    Lwt_eio.with_event_loop ~clock:env#clock @@ fun () ->
     Tcp.listen tcp ~port:9999 (fun flow ->
       Tcp.write flow (Cstruct.of_string "aaa") >|= Result.get_ok);
-    Eio_unikraft.run @@ fun env ->
-    (* Lwt_eio.with_event_loop ~clock:env#clock @@ fun () -> *)
-    (* Lwt_eio.run_eio @@ fun () -> *)
     Logs.info (fun f -> f "Hello");
-    (* Eio.traceln "Started!!!"; *)
+    Eio.traceln "Started!!!";
     let repo = Mem.Repo.v (Irmin_mem.config ()) in
     let main = Mem.main repo in
     let info () =
       Irmin.Info.Default.v ~author:"test" ~message:"test" (now env#clock)
     in
+    Eio.Switch.run @@ fun _ ->
     Logs.info (fun f -> f "Hello");
     let () = Mem.set_exn main ~info ["greeting"] "Hello from Irmin!" in
     let rec loop = function
