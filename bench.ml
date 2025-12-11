@@ -1,37 +1,78 @@
 
-module Mem = Irmin_mem.KV.Make(Irmin.Contents.String)
+type t = {
+  ncommits : int;
+  depth : int;
+  tree_add : int;
+  display : int;
+  clear : bool;
+  gc : int;
+}
 
-let gen_val n c =
-  String.make n (char_of_int (c mod 255))
+let t = {
+  ncommits = 1000;
+  depth = 16;
+  tree_add = 150;
+  display = 10;
+  clear = true;
+  gc = 100; 
+}
 
-let gen_key n c =
-  let v = gen_val n c in
-  [v; v; v]
+module Store = Irmin_mem.KV.Make(Irmin.Contents.String)
+let info () = Store.Info.v ~author:"author" ~message:"commit message" 0L
 
-let run ~info ~sleep ~clock branch n =
-  let rec set_loop = function
-    | 0 -> ()
-    | n ->
-      let k = gen_key 2 n in
-      let v = gen_val 4 n in
-      Mem.set_exn branch ~info k v;
-      Eio.traceln "Set %d" n;
-      Eio.Time.sleep clock sleep;
-      set_loop (n - 1)
+let times ~n ~init f =
+  let rec go i k =
+    if i = 0 then k init else go (i - 1) (fun r -> k (f i r))
   in
-  let rec get_loop = function
-    | 0 -> ()
-    | n ->
-      let k = gen_key 2 n in
-      let v = gen_val 4 n in
-      let v' = Mem.get branch k in
-      Eio.traceln "Get %d" n;
-      assert (v = v');
-      Eio.Time.sleep clock sleep; 
-      get_loop (n - 1)
+  go n Fun.id
+
+let path ~depth n =
+  let rec aux acc = function
+    | i when i = depth -> List.rev (string_of_int n :: acc)
+    | i -> aux (string_of_int i :: acc) (i + 1)
   in
-  Eio.Fiber.all [
-    (fun () -> set_loop n);
-    (fun () -> get_loop n);
-  ]
-  
+  aux [] 0
+
+let no_tags x = x
+
+let plot_progress n t = Fmt.epr "\rcommits: %4d/%d%!" n t
+
+(* init: create a tree with [t.depth] levels and each levels has
+   [t.tree_add] files + one directory going to the next levele. *)
+let init config =
+  let tree = Store.Tree.empty () in
+  let v = Store.Repo.v config |> Store.main in
+  let tree =
+    times ~n:t.depth ~init:tree (fun depth tree ->
+        let paths = Array.init (t.tree_add + 1) (path ~depth) in
+        times ~n:t.tree_add ~init:tree (fun n tree ->
+            Store.Tree.add tree paths.(n) "init"))
+  in
+  Store.set_tree_exn v ~info [] tree;
+  Fmt.epr "[init done]\n%!"
+
+let run config =
+  let r = Store.Repo.v config in
+  let v = Store.main r in
+  Store.Tree.reset_counters ();
+  let paths = Array.init (t.tree_add + 1) (path ~depth:t.depth) in
+  let () =
+    times ~n:t.ncommits ~init:() (fun i () ->
+        let tree = Store.get_tree v [] in
+        if i mod t.gc = 0 then Gc.full_major ();
+        if i mod t.display = 0 then (
+          plot_progress i t.ncommits);
+        let tree =
+          times ~n:t.tree_add ~init:tree (fun n tree ->
+              Store.Tree.add tree paths.(n) (string_of_int i))
+        in
+        Store.set_tree_exn v ~info [] tree;
+        if t.clear then Store.Tree.clear tree)
+  in
+  Store.Repo.close r;
+  Fmt.epr "\n[run done]\n%!"
+
+let main env =
+  let config = Irmin_mem.config() in
+  init config;
+  run config
