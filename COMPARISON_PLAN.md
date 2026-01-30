@@ -24,53 +24,26 @@ qemu-system-x86_64 \
 
 ### System B: Debian Cloud + OCaml
 
-#### Step 1: Download and prepare Debian image
+Build on host (same x86_64 Linux), run in minimal VM.
+
+#### Step 1: Build benchmark binary on host
 
 ```bash
 cd /home/cuihtlauac/caml/irmin-mirage-eio
 
-# Download Debian 12 cloud image
-wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
-
-# Resize to have space for OCaml installation
-qemu-img resize debian-12-nocloud-amd64.qcow2 8G
-```
-
-#### Step 2: First boot - install OCaml and dependencies
-
-```bash
-qemu-system-x86_64 \
-  -machine q35 -m 2048M \
-  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-  -nographic -serial mon:stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0
-```
-
-Inside Debian (login as root, no password):
-```bash
-# Resize filesystem to use full disk
-resize2fs /dev/vda1
-
-# Install OCaml toolchain
-apt update
-apt install -y --no-install-recommends opam build-essential git m4 pkg-config
-
-# Initialize opam with OCaml 5.2.1
-opam init -y --disable-sandboxing
-eval $(opam env)
-opam switch create 5.2.1
-eval $(opam env)
+# Create a separate switch for native Linux builds
+opam switch create debian-bench 5.2.1
+eval $(opam env --switch=debian-bench --set-switch)
 
 # Pin Irmin to eio branch (same as unikernel)
 opam pin add irmin git+https://github.com/mirage/irmin#eio -y
-
-# Install dependencies
 opam install -y fmt dune
+
+# Create benchmark directory
+mkdir -p debian-bench
 ```
 
-#### Step 3: Create benchmark script on Debian
-
-Create `/root/bench/bench.ml` (identical to unikernel version, synchronous API):
+Create `debian-bench/bench.ml` (identical to unikernel version):
 ```ocaml
 type t = {
   ncommits : int;
@@ -108,8 +81,6 @@ let path ~depth n =
 
 let plot_progress n t = Fmt.epr "\rcommits: %4d/%d%!" n t
 
-(* init: create a tree with [t.depth] levels and each levels has
-   [t.tree_add] files + one directory going to the next level. *)
 let init r =
   let tree = Store.Tree.empty () in
   let v = Store.main r in
@@ -148,23 +119,66 @@ let () =
   run r
 ```
 
-Create `/root/bench/dune`:
+Create `debian-bench/dune`:
 ```
 (executable
  (name bench)
  (libraries irmin irmin.mem fmt))
 ```
 
-Create `/root/bench/dune-project`:
+Create `debian-bench/dune-project`:
 ```
 (lang dune 3.0)
 ```
 
-Compile:
+Build:
 ```bash
-cd /root/bench
-eval $(opam env)
+cd debian-bench
+eval $(opam env --switch=debian-bench --set-switch)
 dune build bench.exe
+cp _build/default/bench.exe ../bench-linux
+```
+
+#### Step 2: Prepare minimal Debian image
+
+```bash
+cd /home/cuihtlauac/caml/irmin-mirage-eio
+
+# Download Debian 12 cloud image
+wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
+
+# Keep it small - no resize needed, just the binary
+```
+
+#### Step 3: Inject binary into image
+
+Option A - Using guestfish (if available):
+```bash
+guestfish -a debian-12-nocloud-amd64.qcow2 -i copy-in bench-linux /root/
+```
+
+Option B - Using virt-copy-in (if available):
+```bash
+virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
+```
+
+Option C - Boot VM and copy via console:
+```bash
+# On host: serve the binary
+python3 -m http.server 8080 &
+
+# Boot VM, then inside:
+wget http://10.0.2.2:8080/bench-linux -O /root/bench
+chmod +x /root/bench
+poweroff
+```
+
+#### Step 4: Run benchmark
+
+Boot the minimal Debian image and run the pre-built binary:
+```bash
+# Inside Debian VM:
+/root/bench
 ```
 
 ## Measurements with perf
@@ -270,7 +284,7 @@ echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
 echo "Running Debian benchmark..."
 echo "Note: Start benchmark manually inside VM with:"
-echo "  cd /root/bench && ./_build/default/bench.exe"
+echo "  /root/bench"
 
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/debian_perf.txt \
