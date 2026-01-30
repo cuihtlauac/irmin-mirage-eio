@@ -311,58 +311,96 @@ mkdir -p $RESULTS_DIR
 
 echo "=== System A: Unikernel ===" | tee $RESULTS_DIR/summary.txt
 
-# Drop host caches for consistent cold-start
-sync
-echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+# Warm-up run (no measurement)
+echo "Warm-up run..."
+taskset -c 0 timeout 120 qemu-system-x86_64 \
+  -machine q35 -m 512M \
+  -kernel dist/hello.qemu \
+  -nodefaults -nographic -serial stdio \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 > /dev/null 2>&1
 
-echo "Running unikernel benchmark..."
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  -o $RESULTS_DIR/unikernel_perf.txt \
-  taskset -c 0 timeout 120 qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -kernel dist/hello.qemu \
-    -nodefaults -nographic -serial stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-  2>&1 | tee $RESULTS_DIR/unikernel_output.txt
+# 5 measured runs
+for i in 1 2 3 4 5; do
+  echo "Run $i/5..."
+  sync
+  echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+
+  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
+    -o $RESULTS_DIR/unikernel_perf_$i.txt \
+    taskset -c 0 timeout 120 qemu-system-x86_64 \
+      -machine q35 -m 512M \
+      -kernel dist/hello.qemu \
+      -nodefaults -nographic -serial stdio \
+      -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    2>&1 | tee $RESULTS_DIR/unikernel_output_$i.txt
+done
 
 echo ""
 echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
-# Drop host caches for consistent cold-start
-sync
-echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-
+# Warm-up run (no measurement)
+echo "Warm-up run..."
 FIFO=$(mktemp -u)
 mkfifo $FIFO
-
-echo "Running Debian benchmark (automated)..."
 taskset -c 0 qemu-system-x86_64 \
   -machine q35 -m 512M \
   -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
   -nographic -serial mon:stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $RESULTS_DIR/debian_output.txt | tee $FIFO &
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $FIFO > /dev/null &
 QPID=$!
-
-# Wait for benchmark start marker
-grep -m1 "BENCHMARK_START" $FIFO > /dev/null
-echo "Benchmark started, attaching perf..."
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  -o $RESULTS_DIR/debian_perf.txt -p $QPID &
-PERF_PID=$!
-
-# Wait for benchmark end marker
 grep -m1 "BENCHMARK_END" $FIFO > /dev/null
-echo "Benchmark finished, stopping perf..."
-kill -INT $PERF_PID 2>/dev/null
-
-# Wait for VM shutdown
 wait $QPID 2>/dev/null
 rm -f $FIFO
 
+# 5 measured runs
+for i in 1 2 3 4 5; do
+  echo "Run $i/5..."
+  sync
+  echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+
+  FIFO=$(mktemp -u)
+  mkfifo $FIFO
+
+  taskset -c 0 qemu-system-x86_64 \
+    -machine q35 -m 512M \
+    -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
+    -nographic -serial mon:stdio \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $RESULTS_DIR/debian_output_$i.txt | tee $FIFO &
+  QPID=$!
+
+  # Wait for benchmark start marker
+  grep -m1 "BENCHMARK_START" $FIFO > /dev/null
+  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
+    -o $RESULTS_DIR/debian_perf_$i.txt -p $QPID &
+  PERF_PID=$!
+
+  # Wait for benchmark end marker
+  grep -m1 "BENCHMARK_END" $FIFO > /dev/null
+  kill -INT $PERF_PID 2>/dev/null
+
+  # Wait for VM shutdown
+  wait $QPID 2>/dev/null
+  rm -f $FIFO
+done
+
 echo ""
 echo "=== Results ===" | tee -a $RESULTS_DIR/summary.txt
-cat $RESULTS_DIR/unikernel_perf.txt | tee -a $RESULTS_DIR/summary.txt
-cat $RESULTS_DIR/debian_perf.txt | tee -a $RESULTS_DIR/summary.txt
+echo "Unikernel runs:" | tee -a $RESULTS_DIR/summary.txt
+for i in 1 2 3 4 5; do
+  echo "--- Run $i ---" | tee -a $RESULTS_DIR/summary.txt
+  cat $RESULTS_DIR/unikernel_perf_$i.txt | tee -a $RESULTS_DIR/summary.txt
+done
+
+echo "" | tee -a $RESULTS_DIR/summary.txt
+echo "Debian runs:" | tee -a $RESULTS_DIR/summary.txt
+for i in 1 2 3 4 5; do
+  echo "--- Run $i ---" | tee -a $RESULTS_DIR/summary.txt
+  cat $RESULTS_DIR/debian_perf_$i.txt | tee -a $RESULTS_DIR/summary.txt
+done
+
+echo ""
+echo "Results saved to $RESULTS_DIR/"
+echo "Compute averages with: grep -h 'cycles\|instructions\|cache-misses\|energy-pkg' $RESULTS_DIR/*_perf_*.txt"
 ```
 
 ## Expected Metrics
@@ -379,7 +417,8 @@ cat $RESULTS_DIR/debian_perf.txt | tee -a $RESULTS_DIR/summary.txt
 
 - Energy measurements require Intel RAPL support (most Intel CPUs since Sandy Bridge)
 - AMD CPUs use different energy counters (`power/energy-pkg/` may differ)
-- Run multiple iterations for statistical significance
+- Run 1 warm-up iteration (no measurement) to prime CPU branch predictor and caches
+- Run 5 measured iterations and average results for statistical significance
 - Ensure system is idle during measurements
 - Drop host caches before each run for consistent cold-start:
   ```bash
