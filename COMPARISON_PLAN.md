@@ -215,13 +215,29 @@ perf stat -e cycles,instructions,cache-misses,power/energy-pkg/ \
 
 ### Measuring System B (Debian)
 
+Boot VM first, then attach perf only during benchmark execution (excludes boot):
+
 ```bash
+# Terminal 1: Start VM without perf
+qemu-system-x86_64 \
+  -machine q35 -m 512M \
+  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
+  -nographic -serial mon:stdio \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 &
+QPID=$!
+
+# Wait for boot, login as root (no password)
+# Then in Terminal 2: attach perf to QEMU process
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-    -nographic -serial mon:stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+  -p $QPID &
+PERF_PID=$!
+
+# Terminal 1 (inside VM): run benchmark
+chmod +x /root/bench-linux
+/root/bench-linux
+
+# Terminal 2: stop perf when benchmark completes (Ctrl+C or kill)
+kill -INT $PERF_PID
 ```
 
 ### Memory Measurement
@@ -243,12 +259,12 @@ done
 
 | Measurement | System A (Unikernel) | System B (Debian) |
 |-------------|---------------------|-------------------|
-| CPU cycles | perf stat on QEMU | perf stat on QEMU |
-| Instructions | perf stat on QEMU | perf stat on QEMU |
-| Cache misses | perf stat on QEMU | perf stat on QEMU |
-| Energy (pkg) | perf energy-pkg | perf energy-pkg |
+| CPU cycles | perf stat on QEMU | perf stat -p (attach, no boot) |
+| Instructions | perf stat on QEMU | perf stat -p (attach, no boot) |
+| Cache misses | perf stat on QEMU | perf stat -p (attach, no boot) |
+| Energy (pkg) | perf energy-pkg | perf energy-pkg -p (attach) |
 | Peak memory | ps rss monitoring | ps rss monitoring |
-| Wall time | time command | time command |
+| Wall time | time command | time benchmark only |
 
 ## Execution Script
 
@@ -274,18 +290,13 @@ perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/
 echo ""
 echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
-echo "Running Debian benchmark..."
-echo "Note: Start benchmark manually inside VM with:"
-echo "  chmod +x /root/bench-linux && /root/bench-linux"
-
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  -o $RESULTS_DIR/debian_perf.txt \
-  timeout 300 qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-    -nographic -serial mon:stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-  2>&1 | tee $RESULTS_DIR/debian_output.txt
+echo "Running Debian benchmark (manual steps required)..."
+echo "1. Boot VM:  qemu-system-x86_64 -machine q35 -m 512M -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 -nographic -serial mon:stdio -netdev user,id=n0 -device virtio-net-pci,netdev=n0 &"
+echo "2. Get PID:  QPID=\$!"
+echo "3. Wait for boot, login as root"
+echo "4. Attach perf:  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ -o $RESULTS_DIR/debian_perf.txt -p \$QPID &"
+echo "5. In VM run:  chmod +x /root/bench-linux && /root/bench-linux"
+echo "6. Stop perf:  kill -INT \$(pgrep -f 'perf stat')"
 
 echo ""
 echo "=== Results ===" | tee -a $RESULTS_DIR/summary.txt
