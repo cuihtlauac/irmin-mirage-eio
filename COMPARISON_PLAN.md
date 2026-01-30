@@ -152,33 +152,17 @@ wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd
 
 #### Step 3: Inject binary into image
 
-Option A - Using guestfish (if available):
-```bash
-guestfish -a debian-12-nocloud-amd64.qcow2 -i copy-in bench-linux /root/
-```
-
-Option B - Using virt-copy-in (if available):
 ```bash
 virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
-```
-
-Option C - Boot VM and copy via console:
-```bash
-# On host: serve the binary
-python3 -m http.server 8080 &
-
-# Boot VM, then inside:
-wget http://10.0.2.2:8080/bench-linux -O /root/bench
-chmod +x /root/bench
-poweroff
 ```
 
 #### Step 4: Run benchmark
 
 Boot the minimal Debian image and run the pre-built binary:
 ```bash
-# Inside Debian VM:
-/root/bench
+# Inside Debian VM (login as root, no password):
+chmod +x /root/bench-linux
+/root/bench-linux
 ```
 
 ## Measurements with perf
@@ -284,7 +268,7 @@ echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
 echo "Running Debian benchmark..."
 echo "Note: Start benchmark manually inside VM with:"
-echo "  /root/bench"
+echo "  chmod +x /root/bench-linux && /root/bench-linux"
 
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/debian_perf.txt \
