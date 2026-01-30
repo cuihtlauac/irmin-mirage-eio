@@ -158,20 +158,43 @@ wget -nc https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud
 # Keep it small - no resize needed, just the binary
 ```
 
-#### Step 4: Inject binary into image
+#### Step 4: Inject binary and auto-run service into image
 
+Create systemd service file `debian-bench/benchmark.service`:
+```ini
+[Unit]
+Description=Run Irmin benchmark and shutdown
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo "BENCHMARK_START"; /root/bench-linux; echo "BENCHMARK_END"; poweroff'
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Inject files and enable service:
 ```bash
+# Copy binary
 virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
+
+# Copy service file
+virt-copy-in -a debian-12-nocloud-amd64.qcow2 debian-bench/benchmark.service /etc/systemd/system/
+
+# Enable service (create symlink)
+guestfish -a debian-12-nocloud-amd64.qcow2 -i \
+  ln-sf /etc/systemd/system/benchmark.service /etc/systemd/system/multi-user.target.wants/benchmark.service
+
+# Make binary executable
+guestfish -a debian-12-nocloud-amd64.qcow2 -i \
+  chmod 0755 /root/bench-linux
 ```
 
-#### Step 5: Run benchmark
+#### Step 5: Run benchmark (fully automated)
 
-Boot the minimal Debian image and run the pre-built binary:
-```bash
-# Inside Debian VM (login as root, no password):
-chmod +x /root/bench-linux
-/root/bench-linux
-```
+No user interaction required - VM boots, runs benchmark, shuts down automatically.
 
 ## Measurements with perf
 
@@ -215,29 +238,40 @@ perf stat -e cycles,instructions,cache-misses,power/energy-pkg/ \
 
 ### Measuring System B (Debian)
 
-Boot VM first, then attach perf only during benchmark execution (excludes boot):
+Fully automated - VM boots, script attaches perf when benchmark starts, detaches when done:
 
 ```bash
-# Terminal 1: Start VM without perf
+#!/bin/bash
+# measure_debian.sh
+
+RESULTS_DIR="comparison_results"
+mkdir -p $RESULTS_DIR
+FIFO=$(mktemp -u)
+mkfifo $FIFO
+
+# Start VM, tee output to monitor for markers
 qemu-system-x86_64 \
   -machine q35 -m 512M \
   -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
   -nographic -serial mon:stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 &
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $FIFO &
 QPID=$!
 
-# Wait for boot, login as root (no password)
-# Then in Terminal 2: attach perf to QEMU process
+# Wait for BENCHMARK_START marker, then attach perf
+grep -m1 "BENCHMARK_START" $FIFO
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  -p $QPID &
+  -o $RESULTS_DIR/debian_perf.txt -p $QPID &
 PERF_PID=$!
 
-# Terminal 1 (inside VM): run benchmark
-chmod +x /root/bench-linux
-/root/bench-linux
-
-# Terminal 2: stop perf when benchmark completes (Ctrl+C or kill)
+# Wait for BENCHMARK_END marker, then stop perf
+grep -m1 "BENCHMARK_END" $FIFO
 kill -INT $PERF_PID
+
+# Wait for VM to shutdown
+wait $QPID
+
+rm $FIFO
+cat $RESULTS_DIR/debian_perf.txt
 ```
 
 ### Memory Measurement
@@ -259,12 +293,12 @@ done
 
 | Measurement | System A (Unikernel) | System B (Debian) |
 |-------------|---------------------|-------------------|
-| CPU cycles | perf stat on QEMU | perf stat -p (attach, no boot) |
-| Instructions | perf stat on QEMU | perf stat -p (attach, no boot) |
-| Cache misses | perf stat on QEMU | perf stat -p (attach, no boot) |
-| Energy (pkg) | perf energy-pkg | perf energy-pkg -p (attach) |
+| CPU cycles | perf stat on QEMU | perf stat -p (auto-attach on marker) |
+| Instructions | perf stat on QEMU | perf stat -p (auto-attach on marker) |
+| Cache misses | perf stat on QEMU | perf stat -p (auto-attach on marker) |
+| Energy (pkg) | perf energy-pkg | perf energy-pkg -p (auto-attach) |
 | Peak memory | ps rss monitoring | ps rss monitoring |
-| Wall time | time command | time benchmark only |
+| Wall time | time command | time benchmark only (auto) |
 
 ## Execution Script
 
@@ -290,13 +324,32 @@ perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/
 echo ""
 echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
-echo "Running Debian benchmark (manual steps required)..."
-echo "1. Boot VM:  qemu-system-x86_64 -machine q35 -m 512M -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 -nographic -serial mon:stdio -netdev user,id=n0 -device virtio-net-pci,netdev=n0 &"
-echo "2. Get PID:  QPID=\$!"
-echo "3. Wait for boot, login as root"
-echo "4. Attach perf:  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ -o $RESULTS_DIR/debian_perf.txt -p \$QPID &"
-echo "5. In VM run:  chmod +x /root/bench-linux && /root/bench-linux"
-echo "6. Stop perf:  kill -INT \$(pgrep -f 'perf stat')"
+FIFO=$(mktemp -u)
+mkfifo $FIFO
+
+echo "Running Debian benchmark (automated)..."
+qemu-system-x86_64 \
+  -machine q35 -m 512M \
+  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
+  -nographic -serial mon:stdio \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $RESULTS_DIR/debian_output.txt | tee $FIFO &
+QPID=$!
+
+# Wait for benchmark start marker
+grep -m1 "BENCHMARK_START" $FIFO > /dev/null
+echo "Benchmark started, attaching perf..."
+perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
+  -o $RESULTS_DIR/debian_perf.txt -p $QPID &
+PERF_PID=$!
+
+# Wait for benchmark end marker
+grep -m1 "BENCHMARK_END" $FIFO > /dev/null
+echo "Benchmark finished, stopping perf..."
+kill -INT $PERF_PID 2>/dev/null
+
+# Wait for VM shutdown
+wait $QPID 2>/dev/null
+rm -f $FIFO
 
 echo ""
 echo "=== Results ===" | tee -a $RESULTS_DIR/summary.txt
