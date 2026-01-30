@@ -150,6 +150,69 @@ QEMU (q35 machine type)
 
 QEMU provides hardware emulation. With KVM enabled, it uses hardware virtualization for near-native performance.
 
+#### Q35 Machine Type - Emulated Hardware
+
+The **q35** machine type emulates a 2009-era Intel PC based on the Q35 chipset with ICH9 southbridge.
+
+**Chipset Architecture:**
+
+| Component | Emulated Hardware |
+|-----------|-------------------|
+| Northbridge | Intel Q35 MCH (Memory Controller Hub) |
+| Southbridge | Intel ICH9 (I/O Controller Hub) |
+| Bus | PCIe (PCI Express) |
+
+**Emulated Devices:**
+
+| Category | Device | Description |
+|----------|--------|-------------|
+| CPU | x86_64 | Full x86_64 emulation, KVM-accelerated if available |
+| Memory | DDR Controller | Up to several TB addressable |
+| Storage | ICH9 AHCI | 6-port SATA controller |
+| Network | virtio-net-pci | Paravirtualized NIC (used by this unikernel) |
+| Network | e1000 | Intel Gigabit Ethernet (optional) |
+| Network | rtl8139 | Realtek 10/100 (optional) |
+| USB | ICH9 EHCI | USB 2.0 controller |
+| USB | ICH9 UHCI | USB 1.1 controller |
+| Graphics | Standard VGA | Disabled in our configuration |
+| Timer | HPET | High Precision Event Timer |
+| Input | i8042 | PS/2 keyboard/mouse controller |
+| Serial | 16550A UART | Used for console output |
+| Firmware | SeaBIOS | Legacy BIOS (Multiboot support) |
+
+**Q35 vs i440FX (older QEMU default):**
+
+| Feature | i440fx (1996-era) | q35 (2009-era) |
+|---------|-------------------|----------------|
+| Bus | PCI only | PCIe |
+| Storage | IDE (PIIX) | AHCI/SATA |
+| USB | UHCI only | EHCI + UHCI |
+| PCIe Passthrough | Not supported | Supported |
+| IOMMU | No | Optional (Intel VT-d) |
+
+**Our QEMU Configuration:**
+
+```bash
+qemu-system-x86_64 \
+  -machine q35 \                      # Q35/ICH9 chipset
+  -m 512M \                           # 512MB RAM
+  -kernel dist/hello.qemu \           # Unikernel binary
+  -nodefaults \                       # No default devices
+  -nographic \                        # No graphical output
+  -serial stdio \                     # Serial console to terminal
+  -netdev user,id=n0 \                # User-mode NAT networking
+  -device virtio-net-pci,netdev=n0    # Paravirtualized NIC
+```
+
+**What the unikernel actually uses:**
+
+- **virtio-net-pci** - Paravirtualized network (not full e1000 emulation)
+- **Serial port** - Console output via 16550A UART emulation
+- **Memory** - Flat 512MB address space
+- **CPU** - Single vCPU (can be increased with `-smp`)
+
+The virtio devices are "paravirtualized" - the guest knows it's running in a VM and cooperates with the hypervisor for better performance, rather than QEMU emulating real hardware bit-for-bit.
+
 ### Host Layer
 
 ```
