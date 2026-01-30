@@ -53,7 +53,7 @@ resize2fs /dev/vda1
 
 # Install OCaml toolchain
 apt update
-apt install -y opam build-essential git m4 pkg-config
+apt install -y --no-install-recommends opam build-essential git m4 pkg-config
 
 # Initialize opam with OCaml 5.4
 opam init -y --disable-sandboxing
@@ -210,7 +210,7 @@ perf stat -e cycles,instructions,cache-references,cache-misses \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Energy consumption (Intel RAPL)
-perf stat -e power/energy-pkg/,power/energy-cores/,power/energy-ram/ \
+perf stat -e power/energy-pkg/ \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
@@ -218,7 +218,7 @@ perf stat -e power/energy-pkg/,power/energy-cores/,power/energy-ram/ \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Combined measurement
-perf stat -e cycles,instructions,cache-misses,power/energy-pkg/,power/energy-cores/ \
+perf stat -e cycles,instructions,cache-misses,power/energy-pkg/ \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
@@ -228,9 +228,8 @@ perf stat -e cycles,instructions,cache-misses,power/energy-pkg/,power/energy-cor
 
 ### Measuring System B (Debian)
 
-Option 1: Measure entire VM (includes OS overhead)
 ```bash
-perf stat -e cycles,instructions,cache-misses,power/energy-pkg/,power/energy-cores/ \
+perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
@@ -238,17 +237,9 @@ perf stat -e cycles,instructions,cache-misses,power/energy-pkg/,power/energy-cor
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 ```
 
-Option 2: Measure inside VM (benchmark only, requires perf in guest)
-```bash
-# Inside Debian VM
-apt install -y linux-perf
-perf stat -e cycles,instructions,cache-misses \
-  ./_build/default/bench.exe
-```
-
 ### Memory Measurement
 
-For unikernel - monitor QEMU process:
+Monitor QEMU process RSS from host (same approach for both systems):
 ```bash
 # Run in background
 qemu-system-x86_64 ... &
@@ -261,18 +252,6 @@ while kill -0 $QPID 2>/dev/null; do
 done
 ```
 
-For Debian - inside VM:
-```bash
-# Before benchmark
-free -m > /tmp/mem_before.txt
-
-# Run benchmark
-./_build/default/bench.exe
-
-# After benchmark
-free -m > /tmp/mem_after.txt
-```
-
 ## Test Matrix
 
 | Measurement | System A (Unikernel) | System B (Debian) |
@@ -281,8 +260,7 @@ free -m > /tmp/mem_after.txt
 | Instructions | perf stat on QEMU | perf stat on QEMU |
 | Cache misses | perf stat on QEMU | perf stat on QEMU |
 | Energy (pkg) | perf energy-pkg | perf energy-pkg |
-| Energy (cores) | perf energy-cores | perf energy-cores |
-| Peak memory | ps rss monitoring | ps rss + free -m |
+| Peak memory | ps rss monitoring | ps rss monitoring |
 | Wall time | time command | time command |
 
 ## Execution Script
@@ -297,7 +275,7 @@ mkdir -p $RESULTS_DIR
 echo "=== System A: Unikernel ===" | tee $RESULTS_DIR/summary.txt
 
 echo "Running unikernel benchmark..."
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/,power/energy-cores/ \
+perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/unikernel_perf.txt \
   timeout 120 qemu-system-x86_64 \
     -machine q35 -m 512M \
@@ -313,7 +291,7 @@ echo "Running Debian benchmark..."
 echo "Note: Start benchmark manually inside VM with:"
 echo "  cd /root && perf stat ./_build/default/bench.exe"
 
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/,power/energy-cores/ \
+perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/debian_perf.txt \
   timeout 300 qemu-system-x86_64 \
     -machine q35 -m 512M \
@@ -336,8 +314,6 @@ cat $RESULTS_DIR/debian_perf.txt | tee -a $RESULTS_DIR/summary.txt
 | instructions | Total instructions executed |
 | cache-misses | L3 cache misses (memory pressure) |
 | energy-pkg | Total package energy (CPU + uncore) in Joules |
-| energy-cores | CPU core energy in Joules |
-| energy-ram | DRAM energy in Joules |
 | rss | Resident Set Size (actual RAM used) |
 
 ## Notes
