@@ -14,7 +14,7 @@ let t = {
   tree_add = 150;
   display = 10;
   clear = true;
-  gc = 100; 
+  gc = 100;
 }
 
 module Store = Irmin_mem.KV.Make(Irmin.Contents.String)
@@ -39,40 +39,40 @@ let plot_progress n t = Fmt.epr "\rcommits: %4d/%d%!" n t
 
 (* init: create a tree with [t.depth] levels and each levels has
    [t.tree_add] files + one directory going to the next levele. *)
-let init config =
+let init r =
   let tree = Store.Tree.empty () in
-  let v = Store.Repo.v config |> Store.main in
+  let v = Lwt_eio.run_lwt (fun () -> Store.main r) in
   let tree =
     times ~n:t.depth ~init:tree (fun depth tree ->
         let paths = Array.init (t.tree_add + 1) (path ~depth) in
         times ~n:t.tree_add ~init:tree (fun n tree ->
-            Store.Tree.add tree paths.(n) "init"))
+            Lwt_eio.run_lwt (fun () -> Store.Tree.add tree paths.(n) "init")))
   in
-  Store.set_tree_exn v ~info [] tree;
+  Lwt_eio.run_lwt (fun () -> Store.set_tree_exn v ~info [] tree);
   Fmt.epr "[init done]\n%!"
 
 let run config =
-  let r = Store.Repo.v config in
-  let v = Store.main r in
+  let v = Lwt_eio.run_lwt (fun () -> Store.main config) in
   Store.Tree.reset_counters ();
   let paths = Array.init (t.tree_add + 1) (path ~depth:t.depth) in
   let () =
     times ~n:t.ncommits ~init:() (fun i () ->
-        let tree = Store.get_tree v [] in
+        let tree = Lwt_eio.run_lwt (fun () -> Store.get_tree v []) in
         if i mod t.gc = 0 then Gc.full_major ();
         if i mod t.display = 0 then (
           plot_progress i t.ncommits);
         let tree =
           times ~n:t.tree_add ~init:tree (fun n tree ->
-              Store.Tree.add tree paths.(n) (string_of_int i))
+              Lwt_eio.run_lwt (fun () -> Store.Tree.add tree paths.(n) (string_of_int i)))
         in
-        Store.set_tree_exn v ~info [] tree;
+        Lwt_eio.run_lwt (fun () -> Store.set_tree_exn v ~info [] tree);
         if t.clear then Store.Tree.clear tree)
   in
-  Store.Repo.close r;
+  Lwt_eio.run_lwt (fun () -> Store.Repo.close config);
   Fmt.epr "\n[run done]\n%!"
 
-let main env =
+let main _env =
   let config = Irmin_mem.config() in
-  init config;
-  run config
+  let r = Lwt_eio.run_lwt (fun () -> Store.Repo.v config) in
+  init r;
+  run r
