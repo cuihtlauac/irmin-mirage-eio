@@ -212,7 +212,7 @@ perf list | grep energy
 
 ```bash
 # CPU cycles, instructions, cache misses
-perf stat -e cycles,instructions,cache-references,cache-misses \
+perf stat -x, -e cycles,instructions,cache-references,cache-misses \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
@@ -220,7 +220,7 @@ perf stat -e cycles,instructions,cache-references,cache-misses \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Energy consumption (Intel RAPL)
-perf stat -e power/energy-pkg/ \
+perf stat -x, -e power/energy-pkg/ \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
@@ -228,7 +228,7 @@ perf stat -e power/energy-pkg/ \
     -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 
 # Combined measurement
-perf stat -e cycles,instructions,cache-misses,power/energy-pkg/ \
+perf stat -x, -e cycles,instructions,cache-misses,power/energy-pkg/ \
   qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
@@ -325,7 +325,7 @@ for i in 1 2 3 4 5; do
   sync
   echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
-  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
+  perf stat -x, -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
     -o $RESULTS_DIR/unikernel_perf_$i.txt \
     taskset -c 0 timeout 120 qemu-system-x86_64 \
       -machine q35 -m 512M \
@@ -370,7 +370,7 @@ for i in 1 2 3 4 5; do
 
   # Wait for benchmark start marker
   grep -m1 "BENCHMARK_START" $FIFO > /dev/null
-  perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
+  perf stat -x, -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
     -o $RESULTS_DIR/debian_perf_$i.txt -p $QPID &
   PERF_PID=$!
 
@@ -399,11 +399,13 @@ for i in 1 2 3 4 5; do
 done
 
 echo ""
-echo "Results saved to $RESULTS_DIR/"
-echo "Compute averages with: grep -h 'cycles\|instructions\|cache-misses\|energy-pkg' $RESULTS_DIR/*_perf_*.txt"
+echo "Results saved to $RESULTS_DIR/ (CSV format)"
+echo "Parse with: awk -F, '{sum[\$3]+=\$1; count[\$3]++} END {for(k in sum) print k, sum[k]/count[k]}' $RESULTS_DIR/*_perf_*.txt"
 ```
 
 ## Expected Metrics
+
+Output format is CSV (`-x,`): `value,,event_name,run_time,percentage,,extra_info`
 
 | Metric | What it measures |
 |--------|------------------|
