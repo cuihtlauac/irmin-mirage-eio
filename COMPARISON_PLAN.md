@@ -249,8 +249,8 @@ mkdir -p $RESULTS_DIR
 FIFO=$(mktemp -u)
 mkfifo $FIFO
 
-# Start VM, tee output to monitor for markers
-qemu-system-x86_64 \
+# Start VM pinned to core 0, tee output to monitor for markers
+taskset -c 0 qemu-system-x86_64 \
   -machine q35 -m 512M \
   -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
   -nographic -serial mon:stdio \
@@ -318,7 +318,7 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 echo "Running unikernel benchmark..."
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/unikernel_perf.txt \
-  timeout 120 qemu-system-x86_64 \
+  taskset -c 0 timeout 120 qemu-system-x86_64 \
     -machine q35 -m 512M \
     -kernel dist/hello.qemu \
     -nodefaults -nographic -serial stdio \
@@ -336,7 +336,7 @@ FIFO=$(mktemp -u)
 mkfifo $FIFO
 
 echo "Running Debian benchmark (automated)..."
-qemu-system-x86_64 \
+taskset -c 0 qemu-system-x86_64 \
   -machine q35 -m 512M \
   -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
   -nographic -serial mon:stdio \
@@ -384,6 +384,10 @@ cat $RESULTS_DIR/debian_perf.txt | tee -a $RESULTS_DIR/summary.txt
 - Drop host caches before each run for consistent cold-start:
   ```bash
   sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+  ```
+- Pin QEMU to a specific core to avoid migration and cache effects:
+  ```bash
+  taskset -c 0 qemu-system-x86_64 ...
   ```
 - Consider disabling turbo boost for consistent results:
   ```bash
