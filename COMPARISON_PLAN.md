@@ -8,19 +8,21 @@ Run identical Irmin benchmarks on:
 - **System A**: MirageOS + Unikraft unikernel
 - **System B**: Debian Cloud with native OCaml
 
-Measure: CPU cycles, memory usage, energy consumption.
+Measure: CPU cycles, instructions, cache misses, energy consumption.
 
 ## Setup
 
 ### System A: MirageOS + Unikraft (existing)
 
 ```bash
-qemu-system-x86_64 \
-  -machine q35 -m 512M \
+qemu-system-x86_64 -m 512M \
   -kernel dist/hello.qemu \
-  -nodefaults -nographic -serial stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+  -nodefaults -nographic -monitor none -serial stdio \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -device VGA,id=none
 ```
+
+Note: QEMU 10.x requires `-monitor none` and `-device VGA,id=none` to avoid conflicts with stdio.
 
 ### System B: Debian Cloud + OCaml
 
@@ -33,7 +35,7 @@ cd /home/cuihtlauac/caml/irmin-mirage-eio
 mkdir -p debian-bench
 ```
 
-Create `debian-bench/bench.ml` (identical to unikernel version):
+Create `debian-bench/bench.ml` (needs Eio_main.run wrapper for standalone execution):
 ```ocaml
 type t = {
   ncommits : int;
@@ -103,6 +105,7 @@ let run config =
   Fmt.epr "\n[run done]\n%!"
 
 let () =
+  Eio_main.run @@ fun _env ->
   let config = Irmin_mem.config () in
   let r = Store.Repo.v config in
   init r;
@@ -113,12 +116,27 @@ Create `debian-bench/dune`:
 ```
 (executable
  (name bench)
- (libraries irmin irmin.mem fmt))
+ (libraries irmin irmin.mem fmt eio_main))
 ```
 
 Create `debian-bench/dune-project`:
 ```
 (lang dune 3.0)
+```
+
+Create `debian-bench/benchmark.service`:
+```ini
+[Unit]
+Description=Run Irmin benchmark and shutdown
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo "BENCHMARK_START"; /root/bench-linux; echo "BENCHMARK_END"; poweroff'
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 #### Step 2: Build in Debian 12 container
@@ -137,7 +155,7 @@ podman run --rm -v $PWD/debian-bench:/work:Z debian:12 bash -c '
   eval $(opam env)
 
   opam pin add irmin git+https://github.com/mirage/irmin#eio -y
-  opam install -y fmt dune
+  opam install -y fmt dune eio_main
 
   cd /work
   eval $(opam env)
@@ -154,42 +172,26 @@ cd /home/cuihtlauac/caml/irmin-mirage-eio
 
 # Download Debian 12 cloud image (if not already present)
 wget -nc https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
-
-# Keep it small - no resize needed, just the binary
 ```
 
 #### Step 4: Inject binary and auto-run service into image
 
-Create systemd service file `debian-bench/benchmark.service`:
-```ini
-[Unit]
-Description=Run Irmin benchmark and shutdown
-After=multi-user.target
+Requires `guestfs-tools` and `guestfish` packages. Commands need sudo due to libguestfs kernel access:
 
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'echo "BENCHMARK_START"; /root/bench-linux; echo "BENCHMARK_END"; poweroff'
-StandardOutput=journal+console
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Inject files and enable service:
 ```bash
+cd /home/cuihtlauac/caml/irmin-mirage-eio
+
 # Copy binary
-virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
+sudo virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
 
 # Copy service file
-virt-copy-in -a debian-12-nocloud-amd64.qcow2 debian-bench/benchmark.service /etc/systemd/system/
+sudo virt-copy-in -a debian-12-nocloud-amd64.qcow2 debian-bench/benchmark.service /etc/systemd/system/
 
-# Enable service (create symlink)
-guestfish -a debian-12-nocloud-amd64.qcow2 -i \
-  ln-sf /etc/systemd/system/benchmark.service /etc/systemd/system/multi-user.target.wants/benchmark.service
-
-# Make binary executable
-guestfish -a debian-12-nocloud-amd64.qcow2 -i \
-  chmod 0755 /root/bench-linux
+# Enable service and make binary executable
+sudo guestfish -a debian-12-nocloud-amd64.qcow2 -i <<EOF
+ln-sf /etc/systemd/system/benchmark.service /etc/systemd/system/multi-user.target.wants/benchmark.service
+chmod 0755 /root/bench-linux
+EOF
 ```
 
 #### Step 5: Run benchmark (fully automated)
@@ -206,99 +208,36 @@ echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 
 # Check energy measurement support (Intel RAPL)
 perf list | grep energy
+# Should show: power/energy-psys/, power/energy-pkg/, etc.
 ```
+
+### Measurement Approach
+
+Use system-wide measurement (`-a` flag) for energy counters. Pin QEMU to core 0 with `taskset` to isolate measurements. Both systems are measured for the full VM lifecycle (boot + benchmark + shutdown) for fair comparison.
 
 ### Measuring System A (Unikernel)
 
 ```bash
-# CPU cycles, instructions, cache misses
-perf stat -x, -e cycles,instructions,cache-references,cache-misses \
-  qemu-system-x86_64 \
-    -machine q35 -m 512M \
+perf stat -a -x, -e cycles,instructions,cache-references,cache-misses,power/energy-psys/ \
+  -- taskset -c 0 qemu-system-x86_64 -m 512M \
     -kernel dist/hello.qemu \
-    -nodefaults -nographic -serial stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0
-
-# Energy consumption (Intel RAPL)
-perf stat -x, -e power/energy-pkg/ \
-  qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -kernel dist/hello.qemu \
-    -nodefaults -nographic -serial stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0
-
-# Combined measurement
-perf stat -x, -e cycles,instructions,cache-misses,power/energy-pkg/ \
-  qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -kernel dist/hello.qemu \
-    -nodefaults -nographic -serial stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0
+    -nodefaults -nographic -monitor none -serial stdio \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -device VGA,id=none
 ```
 
 ### Measuring System B (Debian)
 
-Fully automated - VM boots, script attaches perf when benchmark starts, detaches when done:
-
 ```bash
-#!/bin/bash
-# measure_debian.sh
-
-RESULTS_DIR="comparison_results"
-mkdir -p $RESULTS_DIR
-FIFO=$(mktemp -u)
-mkfifo $FIFO
-
-# Start VM pinned to core 0, tee output to monitor for markers
-taskset -c 0 qemu-system-x86_64 \
-  -machine q35 -m 512M \
-  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-  -nographic -serial mon:stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $FIFO &
-QPID=$!
-
-# Wait for BENCHMARK_START marker, then attach perf
-grep -m1 "BENCHMARK_START" $FIFO
-perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-  -o $RESULTS_DIR/debian_perf.txt -p $QPID &
-PERF_PID=$!
-
-# Wait for BENCHMARK_END marker, then stop perf
-grep -m1 "BENCHMARK_END" $FIFO
-kill -INT $PERF_PID
-
-# Wait for VM to shutdown
-wait $QPID
-
-rm $FIFO
-cat $RESULTS_DIR/debian_perf.txt
+perf stat -a -x, -e cycles,instructions,cache-references,cache-misses,power/energy-psys/ \
+  -- taskset -c 0 qemu-system-x86_64 \
+    -machine q35 -m 512M \
+    -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2,snapshot=on \
+    -nographic -monitor none -serial stdio \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0
 ```
 
-### Memory Measurement
-
-Monitor QEMU process RSS from host (same approach for both systems):
-```bash
-# Run in background
-qemu-system-x86_64 ... &
-QPID=$!
-
-# Sample memory every second
-while kill -0 $QPID 2>/dev/null; do
-  ps -o rss= -p $QPID
-  sleep 1
-done
-```
-
-## Test Matrix
-
-| Measurement | System A (Unikernel) | System B (Debian) |
-|-------------|---------------------|-------------------|
-| CPU cycles | perf stat on QEMU | perf stat -p (auto-attach on marker) |
-| Instructions | perf stat on QEMU | perf stat -p (auto-attach on marker) |
-| Cache misses | perf stat on QEMU | perf stat -p (auto-attach on marker) |
-| Energy (pkg) | perf energy-pkg | perf energy-pkg -p (auto-attach) |
-| Peak memory | ps rss monitoring | ps rss monitoring |
-| Wall time | time command | time benchmark only (auto) |
+Note: `snapshot=on` prevents modifications to the disk image.
 
 ## Execution Script
 
@@ -309,128 +248,114 @@ done
 RESULTS_DIR="comparison_results"
 mkdir -p $RESULTS_DIR
 
-echo "=== System A: Unikernel ===" | tee $RESULTS_DIR/summary.txt
+echo "=== System A: Unikernel ==="
 
 # Warm-up run (no measurement)
 echo "Warm-up run..."
-taskset -c 0 timeout 120 qemu-system-x86_64 \
-  -machine q35 -m 512M \
+taskset -c 0 qemu-system-x86_64 -m 512M \
   -kernel dist/hello.qemu \
-  -nodefaults -nographic -serial stdio \
+  -nodefaults -nographic -monitor none -serial stdio \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -device VGA,id=none > /dev/null 2>&1
+
+# 5 measured runs
+for i in 1 2 3 4 5; do
+  echo "Unikernel Run $i/5..."
+  sync
+
+  perf stat -a -x, -e cycles,instructions,cache-references,cache-misses,power/energy-psys/ \
+    -- taskset -c 0 qemu-system-x86_64 -m 512M \
+      -kernel dist/hello.qemu \
+      -nodefaults -nographic -monitor none -serial stdio \
+      -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+      -device VGA,id=none \
+    > $RESULTS_DIR/unikernel_output_$i.txt 2> $RESULTS_DIR/unikernel_perf_$i.txt
+done
+
+echo ""
+echo "=== System B: Debian ==="
+
+# Warm-up run (no measurement)
+echo "Warm-up run..."
+taskset -c 0 qemu-system-x86_64 \
+  -machine q35 -m 512M \
+  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2,snapshot=on \
+  -nographic -monitor none -serial stdio \
   -netdev user,id=n0 -device virtio-net-pci,netdev=n0 > /dev/null 2>&1
 
 # 5 measured runs
 for i in 1 2 3 4 5; do
-  echo "Run $i/5..."
+  echo "Debian Run $i/5..."
   sync
-  echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
-  perf stat -x, -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-    -o $RESULTS_DIR/unikernel_perf_$i.txt \
-    taskset -c 0 timeout 120 qemu-system-x86_64 \
+  perf stat -a -x, -e cycles,instructions,cache-references,cache-misses,power/energy-psys/ \
+    -- taskset -c 0 qemu-system-x86_64 \
       -machine q35 -m 512M \
-      -kernel dist/hello.qemu \
-      -nodefaults -nographic -serial stdio \
+      -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2,snapshot=on \
+      -nographic -monitor none -serial stdio \
       -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    2>&1 | tee $RESULTS_DIR/unikernel_output_$i.txt
+    > $RESULTS_DIR/debian_output_$i.txt 2> $RESULTS_DIR/debian_perf_$i.txt
 done
 
 echo ""
-echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
-
-# Warm-up run (no measurement)
-echo "Warm-up run..."
-FIFO=$(mktemp -u)
-mkfifo $FIFO
-taskset -c 0 qemu-system-x86_64 \
-  -machine q35 -m 512M \
-  -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-  -nographic -serial mon:stdio \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $FIFO > /dev/null &
-QPID=$!
-grep -m1 "BENCHMARK_END" $FIFO > /dev/null
-wait $QPID 2>/dev/null
-rm -f $FIFO
-
-# 5 measured runs
+echo "=== Results ==="
+echo "Unikernel runs:"
 for i in 1 2 3 4 5; do
-  echo "Run $i/5..."
-  sync
-  echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-
-  FIFO=$(mktemp -u)
-  mkfifo $FIFO
-
-  taskset -c 0 qemu-system-x86_64 \
-    -machine q35 -m 512M \
-    -drive file=debian-12-nocloud-amd64.qcow2,if=virtio,format=qcow2 \
-    -nographic -serial mon:stdio \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 2>&1 | tee $RESULTS_DIR/debian_output_$i.txt | tee $FIFO &
-  QPID=$!
-
-  # Wait for benchmark start marker
-  grep -m1 "BENCHMARK_START" $FIFO > /dev/null
-  perf stat -x, -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
-    -o $RESULTS_DIR/debian_perf_$i.txt -p $QPID &
-  PERF_PID=$!
-
-  # Wait for benchmark end marker
-  grep -m1 "BENCHMARK_END" $FIFO > /dev/null
-  kill -INT $PERF_PID 2>/dev/null
-
-  # Wait for VM shutdown
-  wait $QPID 2>/dev/null
-  rm -f $FIFO
+  echo "--- Run $i ---"
+  cat $RESULTS_DIR/unikernel_perf_$i.txt
 done
 
 echo ""
-echo "=== Results ===" | tee -a $RESULTS_DIR/summary.txt
-echo "Unikernel runs:" | tee -a $RESULTS_DIR/summary.txt
+echo "Debian runs:"
 for i in 1 2 3 4 5; do
-  echo "--- Run $i ---" | tee -a $RESULTS_DIR/summary.txt
-  cat $RESULTS_DIR/unikernel_perf_$i.txt | tee -a $RESULTS_DIR/summary.txt
-done
-
-echo "" | tee -a $RESULTS_DIR/summary.txt
-echo "Debian runs:" | tee -a $RESULTS_DIR/summary.txt
-for i in 1 2 3 4 5; do
-  echo "--- Run $i ---" | tee -a $RESULTS_DIR/summary.txt
-  cat $RESULTS_DIR/debian_perf_$i.txt | tee -a $RESULTS_DIR/summary.txt
+  echo "--- Run $i ---"
+  cat $RESULTS_DIR/debian_perf_$i.txt
 done
 
 echo ""
 echo "Results saved to $RESULTS_DIR/ (CSV format)"
-echo "Parse with: awk -F, '{sum[\$3]+=\$1; count[\$3]++} END {for(k in sum) print k, sum[k]/count[k]}' $RESULTS_DIR/*_perf_*.txt"
 ```
 
 ## Expected Metrics
 
 Output format is CSV (`-x,`): `value,,event_name,run_time,percentage,,extra_info`
 
+On hybrid Intel CPUs (P-cores + E-cores), you'll see separate `cpu_core` and `cpu_atom` metrics.
+
 | Metric | What it measures |
 |--------|------------------|
 | cycles | Total CPU cycles consumed |
 | instructions | Total instructions executed |
 | cache-misses | L3 cache misses (memory pressure) |
-| energy-pkg | Total package energy (CPU + uncore) in Joules |
-| rss | Resident Set Size (actual RAM used) |
+| energy-psys | Platform energy (full system) in Joules |
+
+## Sample Results
+
+```
+=== COMPARISON SUMMARY ===
+
+                        Unikernel (avg)     Debian (avg)        Ratio (Debian/Unikernel)
+Cycles:                    1.90e+11            3.68e+11     1.94x
+Instructions:              5.54e+11            9.57e+11     1.73x
+Cache misses:              1.05e+09            2.34e+09     2.22x
+Energy (Joules):            1027.00             1811.00     1.76x
+```
 
 ## Notes
 
-- Energy measurements require Intel RAPL support (most Intel CPUs since Sandy Bridge)
-- AMD CPUs use different energy counters (`power/energy-pkg/` may differ)
+- Energy measurements use `power/energy-psys/` (platform energy) which works without root
+- System-wide measurement (`-a` flag) is required for energy counters
+- Measurements include full VM lifecycle (boot + benchmark + shutdown)
+- The unikernel boots much faster, so proportionally more time is spent on actual benchmark work
+- Debian includes Linux kernel boot, systemd initialization, etc.
 - Run 1 warm-up iteration (no measurement) to prime CPU branch predictor and caches
 - Run 5 measured iterations and average results for statistical significance
 - Ensure system is idle during measurements
-- Drop host caches before each run for consistent cold-start:
-  ```bash
-  sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-  ```
-- Pin QEMU to a specific core to avoid migration and cache effects:
+- Pin QEMU to a specific core to reduce scheduling variance:
   ```bash
   taskset -c 0 qemu-system-x86_64 ...
   ```
-- Consider disabling turbo boost for consistent results:
+- Consider disabling turbo boost for more consistent results:
   ```bash
   echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
   ```

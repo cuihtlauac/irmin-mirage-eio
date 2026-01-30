@@ -1,0 +1,3 @@
+(executable
+ (name bench)
+ (libraries irmin irmin.mem fmt eio_main))

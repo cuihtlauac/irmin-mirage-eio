@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Irmin benchmark and shutdown
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo "BENCHMARK_START"; /root/bench-linux; echo "BENCHMARK_END"; poweroff'
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target
