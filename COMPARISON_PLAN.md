@@ -24,22 +24,12 @@ qemu-system-x86_64 \
 
 ### System B: Debian Cloud + OCaml
 
-Build on host (same x86_64 Linux), run in minimal VM.
+Build in Debian 12 container (correct glibc), run in minimal VM.
 
-#### Step 1: Build benchmark binary on host
+#### Step 1: Create benchmark source
 
 ```bash
 cd /home/cuihtlauac/caml/irmin-mirage-eio
-
-# Create a separate switch for native Linux builds
-opam switch create debian-bench 5.2.1
-eval $(opam env --switch=debian-bench --set-switch)
-
-# Pin Irmin to eio branch (same as unikernel)
-opam pin add irmin git+https://github.com/mirage/irmin#eio -y
-opam install -y fmt dune
-
-# Create benchmark directory
 mkdir -p debian-bench
 ```
 
@@ -131,32 +121,50 @@ Create `debian-bench/dune-project`:
 (lang dune 3.0)
 ```
 
-Build:
-```bash
-cd debian-bench
-eval $(opam env --switch=debian-bench --set-switch)
-dune build bench.exe
-cp _build/default/bench.exe ../bench-linux
-```
-
-#### Step 2: Prepare minimal Debian image
+#### Step 2: Build in Debian 12 container
 
 ```bash
 cd /home/cuihtlauac/caml/irmin-mirage-eio
 
-# Download Debian 12 cloud image
-wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
+podman run --rm -v $PWD/debian-bench:/work:Z debian:12 bash -c '
+  set -ex
+  apt-get update
+  apt-get install -y --no-install-recommends opam build-essential git m4 pkg-config ca-certificates
+
+  opam init -y --disable-sandboxing
+  eval $(opam env)
+  opam switch create 5.2.1
+  eval $(opam env)
+
+  opam pin add irmin git+https://github.com/mirage/irmin#eio -y
+  opam install -y fmt dune
+
+  cd /work
+  eval $(opam env)
+  dune build bench.exe
+'
+
+cp debian-bench/_build/default/bench.exe bench-linux
+```
+
+#### Step 3: Prepare minimal Debian image
+
+```bash
+cd /home/cuihtlauac/caml/irmin-mirage-eio
+
+# Download Debian 12 cloud image (if not already present)
+wget -nc https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
 
 # Keep it small - no resize needed, just the binary
 ```
 
-#### Step 3: Inject binary into image
+#### Step 4: Inject binary into image
 
 ```bash
 virt-copy-in -a debian-12-nocloud-amd64.qcow2 bench-linux /root/
 ```
 
-#### Step 4: Run benchmark
+#### Step 5: Run benchmark
 
 Boot the minimal Debian image and run the pre-built binary:
 ```bash
