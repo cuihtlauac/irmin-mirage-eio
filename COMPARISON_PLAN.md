@@ -55,19 +55,22 @@ resize2fs /dev/vda1
 apt update
 apt install -y --no-install-recommends opam build-essential git m4 pkg-config
 
-# Initialize opam with OCaml 5.4
+# Initialize opam with OCaml 5.2.1
 opam init -y --disable-sandboxing
 eval $(opam env)
-opam switch create 5.4.0
+opam switch create 5.2.1
 eval $(opam env)
 
-# Install Irmin
-opam install -y irmin irmin-mem fmt
+# Pin Irmin to eio branch (same as unikernel)
+opam pin add irmin git+https://github.com/mirage/irmin#eio -y
+
+# Install dependencies
+opam install -y fmt dune
 ```
 
 #### Step 3: Create benchmark script on Debian
 
-Create `/root/bench.ml`:
+Create `/root/bench/bench.ml` (identical to unikernel version, synchronous API):
 ```ocaml
 type t = {
   ncommits : int;
@@ -105,84 +108,62 @@ let path ~depth n =
 
 let plot_progress n t = Fmt.epr "\rcommits: %4d/%d%!" n t
 
+(* init: create a tree with [t.depth] levels and each levels has
+   [t.tree_add] files + one directory going to the next level. *)
 let init r =
-  let open Lwt.Syntax in
   let tree = Store.Tree.empty () in
-  let* v = Store.main r in
-  let* tree =
-    let rec depth_loop d tree =
-      if d > t.depth then Lwt.return tree
-      else
-        let paths = Array.init (t.tree_add + 1) (path ~depth:d) in
-        let rec add_loop n tree =
-          if n > t.tree_add then Lwt.return tree
-          else
-            let* tree = Store.Tree.add tree paths.(n) "init" in
-            add_loop (n + 1) tree
-        in
-        let* tree = add_loop 1 tree in
-        depth_loop (d + 1) tree
-    in
-    depth_loop 1 tree
+  let v = Store.main r in
+  let tree =
+    times ~n:t.depth ~init:tree (fun depth tree ->
+        let paths = Array.init (t.tree_add + 1) (path ~depth) in
+        times ~n:t.tree_add ~init:tree (fun n tree ->
+            Store.Tree.add tree paths.(n) "init"))
   in
-  let* () = Store.set_tree_exn v ~info [] tree in
-  Fmt.epr "[init done]\n%!";
-  Lwt.return_unit
+  Store.set_tree_exn v ~info [] tree;
+  Fmt.epr "[init done]\n%!"
 
-let run r =
-  let open Lwt.Syntax in
-  let* v = Store.main r in
+let run config =
+  let v = Store.main config in
   Store.Tree.reset_counters ();
   let paths = Array.init (t.tree_add + 1) (path ~depth:t.depth) in
-  let rec commit_loop i =
-    if i > t.ncommits then Lwt.return_unit
-    else begin
-      let* tree = Store.get_tree v [] in
-      if i mod t.gc = 0 then Gc.full_major ();
-      if i mod t.display = 0 then plot_progress i t.ncommits;
-      let rec add_loop n tree =
-        if n > t.tree_add then Lwt.return tree
-        else
-          let* tree = Store.Tree.add tree paths.(n) (string_of_int i) in
-          add_loop (n + 1) tree
-      in
-      let* tree = add_loop 1 tree in
-      let* () = Store.set_tree_exn v ~info [] tree in
-      if t.clear then Store.Tree.clear tree;
-      commit_loop (i + 1)
-    end
+  let () =
+    times ~n:t.ncommits ~init:() (fun i () ->
+        let tree = Store.get_tree v [] in
+        if i mod t.gc = 0 then Gc.full_major ();
+        if i mod t.display = 0 then plot_progress i t.ncommits;
+        let tree =
+          times ~n:t.tree_add ~init:tree (fun n tree ->
+              Store.Tree.add tree paths.(n) (string_of_int i))
+        in
+        Store.set_tree_exn v ~info [] tree;
+        if t.clear then Store.Tree.clear tree)
   in
-  let* () = commit_loop 1 in
-  let* () = Store.Repo.close r in
-  Fmt.epr "\n[run done]\n%!";
-  Lwt.return_unit
+  Store.Repo.close config;
+  Fmt.epr "\n[run done]\n%!"
 
-let main () =
-  let open Lwt.Syntax in
+let () =
   let config = Irmin_mem.config () in
-  let* r = Store.Repo.v config in
-  let* () = init r in
-  let* () = run r in
-  Lwt.return_unit
-
-let () = Lwt_main.run (main ())
+  let r = Store.Repo.v config in
+  init r;
+  run r
 ```
 
-Create `/root/dune`:
+Create `/root/bench/dune`:
 ```
 (executable
  (name bench)
- (libraries irmin irmin.mem fmt lwt lwt.unix))
+ (libraries irmin irmin.mem fmt))
 ```
 
-Create `/root/dune-project`:
+Create `/root/bench/dune-project`:
 ```
 (lang dune 3.0)
 ```
 
 Compile:
 ```bash
-cd /root
+cd /root/bench
+eval $(opam env)
 dune build bench.exe
 ```
 
@@ -289,7 +270,7 @@ echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
 
 echo "Running Debian benchmark..."
 echo "Note: Start benchmark manually inside VM with:"
-echo "  cd /root && perf stat ./_build/default/bench.exe"
+echo "  cd /root/bench && ./_build/default/bench.exe"
 
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/debian_perf.txt \

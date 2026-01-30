@@ -14,7 +14,7 @@ This document describes the complete software stack from the Irmin benchmark app
 +-----------------------------------------------------------+
 |                    Concurrency Layer                       |
 |  Eio - Effects-based structured concurrency                |
-|  Lwt_eio - Bridge between Lwt (Irmin) and Eio              |
+|  Irmin eio branch - Native synchronous API                 |
 +-----------------------------------------------------------+
                             |
                             v
@@ -56,14 +56,13 @@ This document describes the complete software stack from the Irmin benchmark app
 ```
 bench.ml (Irmin benchmark)
     |
-    +-- Irmin_mem.KV - In-memory key-value store
-    |   +-- Tree operations (add, get)
-    |   +-- Commits with content-addressed storage
-    |
-    +-- Lwt_eio.run_lwt - Bridges Lwt (used by Irmin) to Eio
+    +-- Irmin_mem.KV - In-memory key-value store (eio branch)
+        +-- Tree operations (add, get) - synchronous API
+        +-- Commits with content-addressed storage
+        +-- No Lwt - native effects-based I/O
 ```
 
-The benchmark creates a tree structure with configurable depth and performs repeated commits, testing Irmin's performance in a unikernel environment.
+The benchmark creates a tree structure with configurable depth and performs repeated commits, testing Irmin's performance in a unikernel environment. Uses Irmin from mirage/irmin#eio branch which provides a synchronous API using OCaml 5 effects.
 
 ### Concurrency Layer
 
@@ -73,12 +72,16 @@ Eio (Effects-based I/O)
     +-- Structured concurrency with fibers
     +-- Uses OCaml 5.x effect handlers
     |
+    +-- Irmin eio branch
+    |   +-- Synchronous API (no Lwt monads)
+    |   +-- Direct function calls using effects
+    |
     +-- eio_unikraft - Eio backend for Unikraft
         +-- Fiber scheduling
         +-- I/O event handling
 ```
 
-Eio provides modern, structured concurrency using OCaml 5's effect system. The `eio_unikraft` backend integrates with Unikraft's event loop and scheduler.
+Eio provides modern, structured concurrency using OCaml 5's effect system. The `eio_unikraft` backend integrates with Unikraft's event loop and scheduler. Irmin's eio branch provides a synchronous API that works directly with Eio, eliminating the need for Lwt_eio bridging.
 
 ### Unikernel Layer (MirageOS)
 
