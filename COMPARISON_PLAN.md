@@ -311,6 +311,10 @@ mkdir -p $RESULTS_DIR
 
 echo "=== System A: Unikernel ===" | tee $RESULTS_DIR/summary.txt
 
+# Drop host caches for consistent cold-start
+sync
+echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+
 echo "Running unikernel benchmark..."
 perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/ \
   -o $RESULTS_DIR/unikernel_perf.txt \
@@ -323,6 +327,10 @@ perf stat -e cycles,instructions,cache-references,cache-misses,power/energy-pkg/
 
 echo ""
 echo "=== System B: Debian ===" | tee -a $RESULTS_DIR/summary.txt
+
+# Drop host caches for consistent cold-start
+sync
+echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 FIFO=$(mktemp -u)
 mkfifo $FIFO
@@ -373,6 +381,10 @@ cat $RESULTS_DIR/debian_perf.txt | tee -a $RESULTS_DIR/summary.txt
 - AMD CPUs use different energy counters (`power/energy-pkg/` may differ)
 - Run multiple iterations for statistical significance
 - Ensure system is idle during measurements
+- Drop host caches before each run for consistent cold-start:
+  ```bash
+  sync && echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+  ```
 - Consider disabling turbo boost for consistent results:
   ```bash
   echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
