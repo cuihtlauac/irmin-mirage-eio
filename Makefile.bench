@@ -1,0 +1,116 @@
+# Makefile.bench - Benchmark targets for MirageOS vs Debian comparison
+#
+# Comparison protocol:
+# - Wall-clock time measured for full QEMU run
+# - MirageOS boot overhead: ~1s (negligible)
+# - Debian boot overhead: ~20s (subtracted from total using kernel timestamps)
+
+QEMU = qemu-system-x86_64
+KERNEL = dist/hello.qemu
+DEBIAN_BASE = debian-12-nocloud-amd64.qcow2
+DEBIAN_IMAGE = debian-12-prepared.qcow2
+RESULTS_DIR = comparison_results
+RUNS = 1 2 3 4 5
+
+# Common QEMU flags
+QEMU_COMMON = -m 512M -nographic -monitor none -serial stdio \
+	-netdev user,id=n0 -device virtio-net-pci,netdev=n0
+
+# MirageOS/Unikraft-specific flags
+QEMU_MIRAGE = -machine q35 -kernel $(KERNEL) -nodefaults \
+	$(QEMU_COMMON) -device VGA,id=none
+
+# Debian-specific flags (snapshot=on prevents disk modifications)
+QEMU_DEBIAN = -machine q35 \
+	-drive file=$(DEBIAN_IMAGE),if=virtio,format=qcow2,snapshot=on \
+	$(QEMU_COMMON)
+
+.PHONY: run-mirage run-debian compare clean-results download-debian build-debian prepare-debian
+
+# Run MirageOS/Unikraft benchmark manually (interactive)
+run-mirage:
+	$(QEMU) $(QEMU_MIRAGE)
+
+# Run Debian benchmark manually (interactive, boots and auto-runs benchmark)
+run-debian:
+	$(QEMU) $(QEMU_DEBIAN)
+
+# Run comparison measuring benchmark duration (excluding Debian boot)
+compare: $(RESULTS_DIR)
+	@echo "=== MirageOS/Unikraft ==="
+	@echo "Warm-up run..."
+	@taskset -c 0 $(QEMU) $(QEMU_MIRAGE) > /dev/null 2>&1
+	@for i in $(RUNS); do \
+		echo "MirageOS Run $$i/5..."; \
+		sync; \
+		/usr/bin/time -f "%e" -o $(RESULTS_DIR)/mirage_time_$$i.txt \
+			taskset -c 0 $(QEMU) $(QEMU_MIRAGE) \
+			> $(RESULTS_DIR)/mirage_output_$$i.txt 2>&1; \
+	done
+	@echo ""
+	@echo "=== Debian ==="
+	@echo "Warm-up run..."
+	@taskset -c 0 $(QEMU) $(QEMU_DEBIAN) > /dev/null 2>&1
+	@for i in $(RUNS); do \
+		echo "Debian Run $$i/5..."; \
+		sync; \
+		taskset -c 0 $(QEMU) $(QEMU_DEBIAN) \
+			> $(RESULTS_DIR)/debian_output_$$i.txt 2>&1; \
+	done
+	@echo ""
+	@echo "=== Benchmark Duration (seconds) ==="
+	@echo ""
+	@echo "MirageOS (wall-clock, boot ~1s):"
+	@for i in $(RUNS); do \
+		echo "  Run $$i: $$(cat $(RESULTS_DIR)/mirage_time_$$i.txt)s"; \
+	done
+	@echo ""
+	@echo "Debian (benchmark only, excluding ~20s boot):"
+	@for i in $(RUNS); do \
+		duration=$$(grep -E 'BENCHMARK_START|BENCHMARK_END' $(RESULTS_DIR)/debian_output_$$i.txt | \
+			sed -n 's/^\[ *\([0-9.]*\)\].*/\1/p' | \
+			awk 'NR==1{start=$$1} NR==2{printf "%.2f", $$1-start}'); \
+		echo "  Run $$i: $${duration}s"; \
+	done
+	@echo ""
+	@echo "Results saved to $(RESULTS_DIR)/"
+
+$(RESULTS_DIR):
+	mkdir -p $(RESULTS_DIR)
+
+# Download Debian 12 cloud image (base image, never modified)
+download-debian:
+	wget -nc -O $(DEBIAN_BASE) https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-nocloud-amd64.qcow2
+
+# Build bench-linux in Debian 12 container (for glibc compatibility with VM)
+build-debian:
+	podman run --rm -v $(PWD)/debian-bench:/work:Z debian:12 bash -c '\
+		set -ex; \
+		apt-get update; \
+		apt-get install -y --no-install-recommends opam build-essential git m4 pkg-config ca-certificates; \
+		opam init -y --disable-sandboxing; \
+		eval $$(opam env); \
+		opam switch create 5.2.1; \
+		eval $$(opam env); \
+		opam pin add irmin git+https://github.com/mirage/irmin\#eio -y; \
+		opam install -y fmt dune eio_main; \
+		cd /work; \
+		eval $$(opam env); \
+		dune build bench.exe'
+	cp debian-bench/_build/default/bench.exe bench-linux
+
+# Create overlay and inject bench-linux and systemd service (requires sudo on Ubuntu)
+prepare-debian: $(DEBIAN_BASE) bench-linux debian-bench/benchmark.service
+	@echo "Creating overlay image on top of pristine base"
+	qemu-img create -f qcow2 -b $(DEBIAN_BASE) -F qcow2 $(DEBIAN_IMAGE)
+	@echo "Injecting files (requires sudo for libguestfs on Ubuntu)"
+	@sudo -v
+	sudo virt-copy-in -a $(DEBIAN_IMAGE) bench-linux /root/
+	sudo virt-copy-in -a $(DEBIAN_IMAGE) debian-bench/benchmark.service /etc/systemd/system/
+	sudo guestfish -a $(DEBIAN_IMAGE) -i \
+		ln-sf /etc/systemd/system/benchmark.service /etc/systemd/system/multi-user.target.wants/benchmark.service : \
+		chmod 0755 /root/bench-linux
+	sudo chown $(shell id -u):$(shell id -g) $(DEBIAN_IMAGE)
+
+clean-results:
+	rm -rf $(RESULTS_DIR)
