@@ -1,0 +1,28 @@
+opam-version: "2.0"
+maintainer:   "Cuihtlauac Alvarado <cuihtauac@tarides.com>"
+authors:      [ "Zach Shipko <zachshipko@gmail.com>" "Cuihtlauac Alvarado <cuihtauac@tarides.com>" ]
+synopsis:     "Compare irmin-eio over Mirage+Unikraft against Debian"
+homepage:     "https://github.com/cuihtlauac/irmin-mirage-eio"
+bug-reports:  "https://github.com/cuihtlauac/irmin-mirage-eio/issues"
+license:      "ISC"
+depends: [
+  "lwt_eio"
+  "index"
+  "irmin-watcher"
+  "eio"
+  "irmin"
+  "mirage"
+  "mirage-unikraft"
+]
+
+pin-depends: [
+  [ "index.dev" "git+https://github.com/mirage/index#6e84bed48db8ab53a09926b45d899815c30f2b39" ]
+  [ "irmin-watcher.dev" "git+https://github.com/patricoferris/irmin-watcher#d0e92b4ba5631b5f4dc0f3c00d97e79542dba45d" ]
+  [ "eio.dev" "git+https://github.com/cuihtlauac/eio#mirage" ]
+  [ "eio_linux.dev" "git+https://github.com/cuihtlauac/eio#mirage" ]
+  [ "eio_posix.dev" "git+https://github.com/cuihtlauac/eio#mirage" ]
+  [ "eio_main.dev" "git+https://github.com/cuihtlauac/eio#mirage" ]
+  [ "eio_unikraft.dev" "git+https://github.com/cuihtlauac/eio#mirage" ]    
+  [ "ppx_irmin.dev" "git+https://github.com/mirage/irmin#eio" ]
+  [ "irmin.dev" "git+https://github.com/mirage/irmin#eio" ]
+]
