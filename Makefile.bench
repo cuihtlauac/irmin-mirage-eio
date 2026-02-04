@@ -2,8 +2,6 @@
 #
 # Comparison protocol:
 # - Wall-clock time measured for full QEMU run
-# - MirageOS boot overhead: ~1s (negligible)
-# - Debian boot overhead: ~20s (subtracted from total using kernel timestamps)
 
 QEMU = qemu-system-x86_64
 KERNEL = dist/hello.qemu
@@ -35,7 +33,7 @@ run-mirage:
 run-debian:
 	$(QEMU) $(QEMU_DEBIAN)
 
-# Run comparison measuring benchmark duration (excluding Debian boot)
+# Run comparison measuring wall-clock duration (including boot)
 compare: $(RESULTS_DIR)
 	@echo "=== MirageOS/Unikraft ==="
 	@echo "Warm-up run..."
@@ -54,23 +52,21 @@ compare: $(RESULTS_DIR)
 	@for i in $(RUNS); do \
 		echo "Debian Run $$i/5..."; \
 		sync; \
-		taskset -c 0 $(QEMU) $(QEMU_DEBIAN) \
+		/usr/bin/time -f "%e" -o $(RESULTS_DIR)/debian_time_$$i.txt \
+			taskset -c 0 $(QEMU) $(QEMU_DEBIAN) \
 			> $(RESULTS_DIR)/debian_output_$$i.txt 2>&1; \
 	done
 	@echo ""
-	@echo "=== Benchmark Duration (seconds) ==="
+	@echo "=== Wall-clock Duration (seconds) ==="
 	@echo ""
-	@echo "MirageOS (wall-clock, boot ~1s):"
+	@echo "MirageOS (boot ~1s + benchmark):"
 	@for i in $(RUNS); do \
 		echo "  Run $$i: $$(cat $(RESULTS_DIR)/mirage_time_$$i.txt)s"; \
 	done
 	@echo ""
-	@echo "Debian (benchmark only, excluding ~20s boot):"
+	@echo "Debian (boot ~20s + benchmark):"
 	@for i in $(RUNS); do \
-		duration=$$(grep -E 'BENCHMARK_START|BENCHMARK_END' $(RESULTS_DIR)/debian_output_$$i.txt | \
-			sed -n 's/^\[ *\([0-9.]*\)\].*/\1/p' | \
-			awk 'NR==1{start=$$1} NR==2{printf "%.2f", $$1-start}'); \
-		echo "  Run $$i: $${duration}s"; \
+		echo "  Run $$i: $$(cat $(RESULTS_DIR)/debian_time_$$i.txt)s"; \
 	done
 	@echo ""
 	@echo "Results saved to $(RESULTS_DIR)/"
